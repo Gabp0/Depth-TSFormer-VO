@@ -1,34 +1,66 @@
 import os
 import glob
 import torch
-import random
 import numpy as np
 import torch.nn.functional as F
-import torchvision.transforms as transforms
 
 from torch.utils.data import Dataset
-from torchvision import models
 from torch.utils.data import DataLoader
+import torchvision.transforms as transforms
 from PIL import Image
-from json import dump
-from tqdm import tqdm
-from datetime import datetime
+from scipy.spatial.transform import Rotation
+from time import sleep
 
 class KITTIOdometryDataset(Dataset):
-    def __init__(self, root_dir, poses_file, transform = None, target_transform = None):
+
+    IMAGE_SIZE = (192, 640)
+    DISP_NORM = (0.95525, 0.43561)
+    YAW_NORM = (0.09490, 1.72319)
+
+    def __init__(self, window_size, root_dir, sequence_numbers, transform = None):
+        self.window_size = window_size
         self.root_dir = root_dir
-        self.poses_file = poses_file
+        self.sequence_numbers = sequence_numbers
         self.transform = transform
-        self.target_transform = target_transform
+        if self.transform is None:
+            self.transform = transforms.Compose([
+                transforms.Resize(self.IMAGE_SIZE),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.3583], std=[0.3142])
+            ])
         
-        self.image_dir = os.path.join(root_dir, 'sequences', poses_file.removesuffix('.txt'), 'image_0')
-        self.image_files = sorted(glob.glob(os.path.join(self.image_dir, '*.png')))
-        self.pose_file = os.path.join(root_dir, 'poses', poses_file)
-        self.poses = self.load_poses(self.pose_file)
+        self.dataset_sequences = []
+        self.dataset_depths = []
+        self.dataset_poses = []
+        self.total_length = 0
+        for sequence_num in sequence_numbers:
+            image_dir = os.path.join(root_dir, 'sequences', sequence_num, 'image_0')
+            depth_dir = os.path.join(root_dir, 'sequences', sequence_num, 'depth_0')
+            image_files = sorted(glob.glob(os.path.join(image_dir, '*.png')))
+            depth_files = sorted(glob.glob(os.path.join(depth_dir, '*.png')))
+            pose_file = os.path.join(root_dir, 'poses', sequence_num + ".txt")
+            poses = self.load_poses(pose_file)
+            self.dataset_sequences.append(image_files)
+            self.dataset_depths.append(depth_files)
+            self.dataset_poses.append(poses)
+            self.total_length += len(image_files) - (self.window_size - 1)
+            print(f"Loaded sequence {sequence_num} with {len(image_files)} images")
+        print(f"Total dataset length (window size {self.window_size}): {self.total_length} samples")
+
+        # values calculated for the complete dataset
+        self.disp_norm = self.DISP_NORM  
+        self.yaw_norm =  self.YAW_NORM   
+
+        print(f"Dataset normalization values: ")
+        print(f"Disparity - mean: {self.disp_norm[0]}  std dev: {self.disp_norm[1]}")
+        print(f"Yaw       - mean: {self.yaw_norm[0]}  std dev: {self.yaw_norm[1]}")
+
+        # disp: mean 0.9552555071464498  std dev 0.43561040902403037
+        # yaw:  mean 0.09490150096396582 std dev 1.7231921715542085
 
         # Reduce rate to 5hz (get 1/6th of the dataset)
-        self.image_files = self.image_files[::6]
-        self.poses = self.poses[::6]
+        # self.image_files = self.image_files[::6]
+        # self.poses = self.poses[::6]
 
     def load_poses(self, pose_file):
         poses = []
@@ -45,48 +77,111 @@ class KITTIOdometryDataset(Dataset):
                 poses.append(transformation_matrix)
 
         return poses
+
+    def pose2yaw_disp(self, prev_pose, curr_pose):
+
+        # get 2d trajectory
+        dx = curr_pose[0, 3] - prev_pose[0, 3]
+        dz = curr_pose[2, 3] - prev_pose[2, 3]
+
+        displacement = np.sqrt(dx**2 + dz**2)
+        yaw = np.arctan2(dz, dx)
+        return displacement, yaw
     
     def __len__(self):
-        return len(self.image_files) - 1
+        return self.total_length
 
     def __getitem__(self, idx):
-        # get image pair
-        img1_path = self.image_files[idx]
-        img2_path = self.image_files[idx + 1]
+        # get sequence and local index
+        seq_idx = 0
+        while idx >= len(self.dataset_sequences[seq_idx]) - (self.window_size - 1):
+            idx -= (len(self.dataset_sequences[seq_idx]) - (self.window_size - 1))
+            seq_idx += 1
 
-        img1 = Image.open(img1_path)
-        img2 = Image.open(img2_path)
+        image_files = self.dataset_sequences[seq_idx]
+        depth_files = self.dataset_depths[seq_idx]
+        poses = self.dataset_poses[seq_idx]    
 
-        # apply transforms
-        if self.transform:
-            img1 = self.transform(img1)
-            img2 = self.transform(img2)
+        # load images and apply transforms
+        imgs = []
+        for w in range(self.window_size):
 
-        # get gt poses 
-        pose1 = self.poses[idx]
-        pose2 = self.poses[idx + 1]
+            if idx + w >= len(image_files):
+                print(f"Index {idx} {w} out of bounds for sequence length {len(image_files)}")
 
-        # compute twist
-        pose_rel = np.linalg.inv(pose1) @ pose2
-        tx = pose_rel[0, 3]
-        ty = pose_rel[1, 3]
-        tz = pose_rel[2, 3]
-        rx = np.arctan2(pose_rel[2, 1], pose_rel[2, 2])
-        ry = np.arctan2(-pose_rel[2, 0], np.sqrt(pose_rel[2, 1]**2 + pose_rel[2, 2]**2))
-        rz = np.arctan2(pose_rel[1, 0], pose_rel[0, 0])
-        twist = torch.tensor([tx, ty, tz, rx, ry, rz], dtype=torch.float32)
+            img = Image.open(image_files[idx + w]) 
+            depth = Image.open(depth_files[idx + w])
+            if self.transform:
+                img = self.transform(img)
+                depth = self.transform(depth)
 
-        return (img1, img2, twist)
+            img = torch.cat((img, depth), dim=0) # concatenate image and depth as different channels
+            img = img.unsqueeze(0) # add new frame dimension
+
+            imgs.append(img)
+        
+        # concat and convert to numpy
+        imgs = np.concatenate(imgs, axis=0)
+        imgs = np.asarray(imgs, dtype=np.float32)
+        imgs = imgs.transpose(1, 0, 2, 3)  # (C, 2, H, W) -> (2, C, H, W)
+
+        # get first and last gt pose 
+        first_pose = poses[idx]
+        last_pose = poses[idx + (self.window_size - 1)]
+        disp, yaw = self.pose2yaw_disp(first_pose, last_pose)
+
+        # normalize
+        disp = (disp - self.disp_norm[0]) / self.disp_norm[1]
+        yaw = (yaw - self.yaw_norm[0]) / self.yaw_norm[1]
+        gt = torch.tensor([disp, yaw], dtype=torch.float32)
+
+        return (imgs, gt)
+
+def plot_yaw_disp(gt):
+    x = [0]
+    y = [0]
+    for disp, yaw in gt:
+        disp = disp * KITTIOdometryDataset.DISP_NORM[1] + KITTIOdometryDataset.DISP_NORM[0]
+        yaw = yaw * KITTIOdometryDataset.YAW_NORM[1] + KITTIOdometryDataset.YAW_NORM[0]
+        x = x + [x[-1] + disp * np.cos(yaw)]
+        y = y + [y[-1] + disp * np.sin(yaw)]
+
+    plt.figure()
+    plt.plot(x, y, marker='o', label='Ground Truth')
+    plt.title('Yaw and Displacement Trajectory')
+    plt.xlabel('X position (m)')
+    plt.ylabel('Y position (m)')
+    plt.axis('equal')
+    plt.grid()    
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig('yaw_displacement_comparison.png')
+
+if __name__ == "__main__":
+    import matplotlib.pyplot as plt
+
+    val_split = 0.2
+    dataset = KITTIOdometryDataset(3, "./Datasets/kitti-odometry/dataset", ["00", "01"])
+
+    val_len = int(len(dataset) * val_split)
+    test_len = int(len(dataset) - val_len)
+    train_data, val_data = torch.utils.data.random_split(dataset, [test_len, val_len], generator=torch.Generator().manual_seed(99))
     
-class RelativePoseLoss(torch.nn.Module):
-    def __init__(self, translation_weight=1.0, rotation_weight=1.0):
-        super(RelativePoseLoss, self).__init__()
-        self.translation_weight = translation_weight
-        self.rotation_weight = rotation_weight
+    train_loader = DataLoader(train_data, batch_size=4, shuffle=True, num_workers=4)
+    val_loader = DataLoader(val_data, batch_size=4, shuffle=False, num_workers=4)
 
-    def forward(self, pred, target):
-        translation_loss = F.mse_loss(pred[:, :3], target[:, :3])
-        rotation_loss = F.mse_loss(pred[:, 3:], target[:, 3:])
-        total_loss = (self.translation_weight * translation_loss +
-                      self.rotation_weight * rotation_loss)
-        return total_loss
+    poses = []
+    first_img = True
+    for imgs, gt in train_loader:
+        if first_img:
+            print(imgs.shape)
+            first_img = False
+
+        disp, yaw = gt.squeeze(0).cpu().numpy()
+        poses.append((disp, yaw))
+
+    for imgs, gt in val_loader:
+        disp, yaw = gt.squeeze(0).cpu().numpy()
+        poses.append((disp, yaw))
+
+    plot_yaw_disp(poses)
