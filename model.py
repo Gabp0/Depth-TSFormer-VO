@@ -1,10 +1,14 @@
 import torch
 from tsformer.vit import VisionTransformer
 from functools import partial
+from torchvision import transforms
+import numpy as np
+import warnings
 
 class ViTVO(torch.nn.Module):
     def __init__(self, params):
         super(ViTVO, self).__init__()
+        self.params = params
 
         self.backbone = VisionTransformer(img_size=params["img_size"], 
                                         patch_size=params["patch_size"],
@@ -22,56 +26,63 @@ class ViTVO(torch.nn.Module):
                                         norm_layer=partial(torch.nn.LayerNorm, eps=1e-6), 
                                         drop_rate=0.0) 
 
+        self.depth_pipeline = None
+
         print(self.backbone)
         print(f"Params num: {sum(p.numel() for p in self.backbone.parameters() if p.requires_grad)}")
 
     def forward(self, x):
         x = self.backbone(x)
         return x
+    
+    def infer_imgs(self, imgs, depths=None):
+        
+        transform = transforms.Compose([
+            transforms.Resize(self.params["img_size"]),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.3583], std=[0.3142])
+        ])
+
+        x = []
+        for i in range(len(imgs)):
+            img = imgs[i]
+            
+            if depths is None:
+                # initialize depth pipe only if required
+                if self.depth_pipeline is None:
+                    from transformers import pipeline
+                    self.depth_pipeline = pipeline(task="depth-estimation", model="depth-anything/Depth-Anything-V2-Small-hf")
+
+                # supress huggingface warnings
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    depth = self.depth_pipeline(img)['depth']
+                    
+            else:
+                depth = depths[i]
+
+            img = transform(img)
+            depth = transform(depth)
+            img = torch.cat((img, depth), dim=0)  # concatenate image and depth channels
+            img = img.unsqueeze(0) # add frames dimension
+            x.append(img)
+
+        x = np.concatenate(x, axis=0)
+        x = np.asarray(x, dtype=np.float32)
+        x = x.transpose(1, 0, 2, 3)  # (C, 2, H, W) -> (2, C, H, W)
+        x = torch.tensor(x, dtype=torch.float32).unsqueeze(0).to('cuda')  # (1, 2, C, H, W) add batch dimension
+
+        with torch.no_grad():
+            y = self.forward(x)
+
+        disp, yaw = y.squeeze(0).cpu().numpy()
+
+        # denormalize
+        disp = disp * self.params['disp_norm'][1] + self.params['disp_norm'][0]
+        yaw = yaw * self.params['yaw_norm'][1] + self.params['yaw_norm'][0]
+
+        return disp, yaw
 
 if __name__ == "__main__":
-    params = {
-        # train params
-        "batch_size": 8,
-        "epochs": 100,
-        "learning_rate": 1e-5,
-        "weight_decay": 1e-4,
-        "val_split": 0.2,
-        "dataset_root": "./Datasets/kitti-odometry/dataset",
-        "output_dir": "./checkpoints",
-        "img_size": (192, 640),
-        "val_split": 0.2,
-
-        # model params - small
-        # "patch_size": 16,
-        # "in_chans": 2,
-        # "num_classes": 2,
-        # "num_frames": 2,
-        # "embed_dim": 384,
-        # "depth": 12,
-        # "num_heads": 6,
-        # "mlp_ratio": 4,
-        # "qkv_bias": True,
-        # "attn_drop_rate": 0.1,
-        # "drop_path_rate": 0.1,
-        # "attention_type": 'divided_space_time'
-
-        # model params - tiny
-        "patch_size": 16,
-        "in_chans": 2,
-        "num_classes": 2,
-        "num_frames": 2,
-        "embed_dim": 192,
-        "depth": 12,
-        "num_heads": 3,
-        "mlp_ratio": 4,
-        "qkv_bias": True,
-        "attn_drop_rate": 0.1,
-        "drop_path_rate": 0.1,
-        "attention_type": 'divided_space_time'
-    }        
-
+    from params import params
     model = ViTVO(params)
-    # print model params
-    total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"Total trainable parameters: {total_params}")

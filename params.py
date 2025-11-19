@@ -14,33 +14,28 @@ params = {
     "disp_norm": KITTIOdometryDataset.DISP_NORM,
     "yaw_norm": KITTIOdometryDataset.YAW_NORM,
 
-    # model params - base
-    # "results_dir": "./Data/results/dtsvo-base",
-    # "patch_size": 16,
-    # "in_chans": 2,
-    # "num_classes": 2,
-    # "num_frames": 2,
-    # "embed_dim": 384,
-    # "depth": 12,
-    # "num_heads": 6,
-    # "mlp_ratio": 4,
-    # "qkv_bias": True,
-    # "attn_drop_rate": 0.1,
-    # "drop_path_rate": 0.1,
-    # "attention_type": 'divided_space_time'
+    # depth params
+    "depth_size": 'vits',
+    "depth_weights": './Data/checkpoints/depth-anything-small/depth_anything_v2_vits.pth',  # path to depth model weights
 
-    # model params - small
-    "results_dir": "./Data/results/dtsvo-small",
     "patch_size": 16,
     "in_chans": 2,
     "num_classes": 2,
     "num_frames": 2,
-    "embed_dim": 192,
     "depth": 12,
-    "num_heads": 3,
     "mlp_ratio": 4,
     "qkv_bias": True,
     "attn_drop_rate": 0.1,
     "drop_path_rate": 0.1,
-    "attention_type": 'divided_space_time'
+    "attention_type": 'divided_space_time',
+
+    # model params - base
+    "results_dir": "./Data/results/dtsvo-base",
+    "embed_dim": 384,
+    "num_heads": 6
+
+    # model params - small
+    # "results_dir": "./Data/results/dtsvo-small",
+    # "embed_dim": 192,
+    # "num_heads": 3
 }        

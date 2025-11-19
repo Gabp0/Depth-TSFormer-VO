@@ -12,32 +12,22 @@ import os
 import glob
 import PIL.Image as Image
 
-from scipy import signal
-
-def lowpass_filter(data, cutoff=0.5, fs=10.0, order=5):
-    nyq = 0.5 * fs
-    normal_cutoff = cutoff / nyq
-    b, a = signal.butter(order, normal_cutoff, btype='low', analog=False)
-    y = signal.filtfilt(b, a, data)
-    return y
-
 def yawdisp2poses(yaw_disps):
     poses = []
-    curr_x, curr_z = 0.0, 0.0
+    curr_x, curr_y = 0.0, 0.0
     curr_yaw = 0.0
     for disp, yaw in yaw_disps:
-        curr_x += disp * np.cos(yaw)
-        curr_z += disp * np.sin(yaw)
         curr_yaw += yaw
-        # Construct transformation matrix
-        cos_yaw = np.cos(curr_yaw)
-        sin_yaw = np.sin(curr_yaw)
+        curr_x += disp * np.cos(yaw)
+        curr_y += disp * np.sin(yaw)
+
         transformation_matrix = np.array([
-            [cos_yaw, 0, -sin_yaw, curr_x],
-            [0,       1, 0,        0.0   ],
-            [sin_yaw, 0, cos_yaw,  curr_z],
-            [0,       0, 0,        1.0   ]
+            [np.cos(curr_yaw), -np.sin(curr_yaw), 0, curr_x],
+            [0,                 0,                1, 0],
+            [np.sin(curr_yaw),  np.cos(curr_yaw), 0, curr_y],
+            [0,                 0,                0, 1]
         ])
+
         poses.append(transformation_matrix)
     return poses
 
@@ -132,12 +122,6 @@ def plot_yaw_disp_comp(estm, gt):
 
 def run_vo(dataset_root, seq, weights_path):
 
-    transform = transforms.Compose([
-        transforms.Resize(params["img_size"]),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.3583], std=[0.3142])
-    ])
-
     window_size = 2
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -156,39 +140,17 @@ def run_vo(dataset_root, seq, weights_path):
     for i in tqdm(range(len(image_files) - 2), desc="Running VO"):
 
         imgs = []
+        depths = []
         for w in range(window_size):
 
             img = Image.open(image_files[i + w]) 
             depth = Image.open(depth_files[i + w])
-            img = transform(img)
-            depth = transform(depth)
-            img = torch.cat((img, depth), dim=0)  # concatenate image and depth channels
-            img = img.unsqueeze(0) # add frames dimension
             imgs.append(img)
+            depths.append(depth)
 
-        # concat and convert to numpy
-        imgs = np.concatenate(imgs, axis=0)
-        imgs = np.asarray(imgs, dtype=np.float32)
-        imgs = imgs.transpose(1, 0, 2, 3)  # (C, 2, H, W) -> (2, C, H, W)
-        imgs = torch.tensor(imgs, dtype=torch.float32).unsqueeze(0).to(device)  # (1, 2, C, H, W) add batch dimension
-
-        with torch.no_grad():
-            y = model(imgs)
-
-        disp, yaw = y.squeeze(0).cpu().numpy()
-
-        # Denormalize
-        disp = disp * params['disp_norm'][1] + params['disp_norm'][0]
-        yaw = yaw * params['yaw_norm'][1] + params['yaw_norm'][0]
+        disp, yaw = model.infer_imgs(imgs)
 
         yaw_disps.append((disp, yaw))
-        # print(yaw_disp)
-
-    # low pass filter
-    # disps, yaws = zip(*yaw_disps)
-    # disps_filt = lowpass_filter(disps, cutoff=0.1, fs=10.0, order=5)
-    # yaws_filt = lowpass_filter(yaws, cutoff=0.1, fs=10.0, order=5)
-    # yaw_disps = list(zip(disps_filt, yaws_filt))
 
     print("Number of poses: ", len(yaw_disps))
 
@@ -213,7 +175,3 @@ if __name__ == "__main__":
 
     for seq in test_seq:
         run_vo(dataset_root, seq, weights_path)
-    
-    # gt_poses = load_poses(os.path.join(dataset_root, 'poses', pose_file))
-    # gt_yaw_disp = poses2yaw_displacement(gt_poses)
-    # plot_yaw_disp(gt_yaw_disp)
