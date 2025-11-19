@@ -5,7 +5,7 @@
 import argparse
 import sys
 
-import utils.checkpoint as cu
+import tsformer.utils.checkpoint as cu
 from timesformer.config.defaults import get_cfg
 
 

@@ -5,8 +5,8 @@
 import torch
 import torch.nn as nn
 
-from models.nonlocal_helper import Nonlocal
-from models.operators import SE, Swish
+from tsformer.nonlocal_helper import Nonlocal
+from tsformer.operators import SE, Swish
 
 import numpy as np
 

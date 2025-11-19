@@ -4,7 +4,7 @@
 
 import numpy as np
 
-import utils.logging as logging
+import tsformer.utils.logging as logging
 
 logger = logging.get_logger(__name__)
 

@@ -14,10 +14,10 @@ from fvcore.nn.flop_count import flop_count
 from matplotlib import pyplot as plt
 from torch import nn
 
-import utils.logging as logging
-import utils.multiprocessing as mpu
+import tsformer.utils.logging as logging
+import tsformer.utils.multiprocessing as mpu
 from timesformer.datasets.utils import pack_pathway_output
-from models.batchnorm_helper import SubBatchNorm3d
+from tsformer.batchnorm_helper import SubBatchNorm3d
 
 logger = logging.get_logger(__name__)
 

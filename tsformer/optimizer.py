@@ -4,7 +4,7 @@
 
 import torch
 
-import utils.lr_policy as lr_policy
+import tsformer.utils.lr_policy as lr_policy
 
 
 def construct_optimizer(model, cfg):

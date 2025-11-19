@@ -10,9 +10,9 @@ import torch
 from fvcore.common.timer import Timer
 from sklearn.metrics import average_precision_score
 
-import utils.logging as logging
-import utils.metrics as metrics
-import utils.misc as misc
+import tsformer.utils.logging as logging
+import tsformer.utils.metrics as metrics
+import tsformer.utils.misc as misc
 
 logger = logging.get_logger(__name__)
 

@@ -10,9 +10,9 @@ from collections import OrderedDict
 import torch
 from fvcore.common.file_io import PathManager
 
-import utils.distributed as du
-import utils.logging as logging
-from utils.c2_model_loading import get_name_convert_func
+import tsformer.utils.distributed as du
+import tsformer.utils.logging as logging
+from tsformer.utils.c2_model_loading import get_name_convert_func
 import torch.nn.functional as F
 
 logger = logging.get_logger(__name__)

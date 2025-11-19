@@ -12,7 +12,7 @@ import sys
 import simplejson
 from fvcore.common.file_io import PathManager
 
-import utils.distributed as du
+import tsformer.utils.distributed as du
 
 
 def _suppress_print():

@@ -9,8 +9,9 @@ from tqdm import tqdm
 from datetime import datetime
 
 # from model_siam import SiamVO
-from model_trans import ViTVO
+from model import ViTVO
 from kitti_dataset import KITTIOdometryDataset
+from params import params
 
 import matplotlib.pyplot as plt
 
@@ -39,12 +40,12 @@ def train(params):
     loss_history = []
 
     for epoch in range(params["epochs"]):
-        print(f"Epoch {epoch+1}/{params["epochs"]}")
+        print(f"Epoch {epoch+1}/{params['epochs']}")
         model.train()
         train_loss = 0.0
 
-        # for imgs, gt in tqdm(train_loader):
-        for imgs, gt in train_loader:
+        for imgs, gt in tqdm(train_loader):
+        # for imgs, gt in train_loader:
             imgs = imgs.to(device)
             gt = gt.to(device)
 
@@ -62,7 +63,7 @@ def train(params):
             train_loss += loss.item()
 
         train_loss /= len(train_loader)
-        print(f"Epoch [{epoch+1}/{params["epochs"]}], Total Loss: {train_loss:.4f}")
+        print(f"Epoch [{epoch+1}/{params['epochs']}], Total Loss: {train_loss:.4f}")
 
         # validation
         val_loss = 0.0
@@ -100,32 +101,5 @@ def train(params):
         plt.close()
 
 if __name__ == "__main__":
-
-    params = {
-        # train params
-        "batch_size": 8,
-        "epochs": 100,
-        "learning_rate": 1e-5,
-        "weight_decay": 1e-4,
-        "val_split": 0.2,
-        "dataset_root": "./Datasets/kitti-odometry/dataset",
-        "output_dir": "./checkpoints",
-        "img_size": KITTIOdometryDataset.IMAGE_SIZE,
-        "val_split": 0.2,
-
-        # model params
-        "patch_size": 16,
-        "in_chans": 2,
-        "num_classes": 2,
-        "num_frames": 2,
-        "embed_dim": 384,
-        "depth": 12,
-        "num_heads": 6,
-        "mlp_ratio": 4,
-        "qkv_bias": True,
-        "attn_drop_rate": 0.1,
-        "drop_path_rate": 0.1,
-        "attention_type": 'divided_space_time'
-    }        
 
     train(params)

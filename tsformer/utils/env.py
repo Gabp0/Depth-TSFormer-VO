@@ -2,7 +2,7 @@
 
 """Set up Environment."""
 
-import utils.logging as logging
+import tsformer.utils.logging as logging
 
 _ENV_SETUP_DONE = False
 

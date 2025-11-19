@@ -1,5 +1,5 @@
 import torch
-from models.vit import VisionTransformer
+from tsformer.vit import VisionTransformer
 from functools import partial
 
 class ViTVO(torch.nn.Module):
@@ -23,13 +23,55 @@ class ViTVO(torch.nn.Module):
                                         drop_rate=0.0) 
 
         print(self.backbone)
+        print(f"Params num: {sum(p.numel() for p in self.backbone.parameters() if p.requires_grad)}")
 
     def forward(self, x):
         x = self.backbone(x)
         return x
 
 if __name__ == "__main__":
-    model = ViTVO()
+    params = {
+        # train params
+        "batch_size": 8,
+        "epochs": 100,
+        "learning_rate": 1e-5,
+        "weight_decay": 1e-4,
+        "val_split": 0.2,
+        "dataset_root": "./Datasets/kitti-odometry/dataset",
+        "output_dir": "./checkpoints",
+        "img_size": (192, 640),
+        "val_split": 0.2,
+
+        # model params - small
+        # "patch_size": 16,
+        # "in_chans": 2,
+        # "num_classes": 2,
+        # "num_frames": 2,
+        # "embed_dim": 384,
+        # "depth": 12,
+        # "num_heads": 6,
+        # "mlp_ratio": 4,
+        # "qkv_bias": True,
+        # "attn_drop_rate": 0.1,
+        # "drop_path_rate": 0.1,
+        # "attention_type": 'divided_space_time'
+
+        # model params - tiny
+        "patch_size": 16,
+        "in_chans": 2,
+        "num_classes": 2,
+        "num_frames": 2,
+        "embed_dim": 192,
+        "depth": 12,
+        "num_heads": 3,
+        "mlp_ratio": 4,
+        "qkv_bias": True,
+        "attn_drop_rate": 0.1,
+        "drop_path_rate": 0.1,
+        "attention_type": 'divided_space_time'
+    }        
+
+    model = ViTVO(params)
     # print model params
     total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Total trainable parameters: {total_params}")

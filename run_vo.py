@@ -1,13 +1,9 @@
 import torch
-import torch.nn.functional as F
 import torchvision.transforms as transforms
-
-from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-# from model_siam import SiamVO
-from model_trans import ViTVO
-from kitti_dataset import KITTIOdometryDataset
+from model import ViTVO
+from params import params
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -16,38 +12,43 @@ import os
 import glob
 import PIL.Image as Image
 
-DISP_NORM = (0.95525, 0.43561)
-YAW_NORM = (0.09490, 1.72319)
+from scipy import signal
 
-def twists2poses(twists):
-    initial_pose = np.eye(4)
-    poses = [initial_pose]
-    current_pose = initial_pose.copy()
+def lowpass_filter(data, cutoff=0.5, fs=10.0, order=5):
+    nyq = 0.5 * fs
+    normal_cutoff = cutoff / nyq
+    b, a = signal.butter(order, normal_cutoff, btype='low', analog=False)
+    y = signal.filtfilt(b, a, data)
+    return y
 
-    for twist in twists:
-        omega = twist[:3]
-        v = twist[3:]
-
-        theta = np.linalg.norm(omega)
-        if theta < 1e-6:
-            R = np.eye(3)
-        else:
-            k = omega / theta
-            K = np.array([[0, -k[2], k[1]],
-                          [k[2], 0, -k[0]],
-                          [-k[1], k[0], 0]])
-            R = np.eye(3) + np.sin(theta) * K + (1 - np.cos(theta)) * (K @ K)
-
-        t = v
-
-        transformation_matrix = np.eye(4)
-        transformation_matrix[:3, :3] = R
-        transformation_matrix[:3, 3] = t
-
-        current_pose = current_pose @ transformation_matrix
-        poses.append(current_pose.copy())
-
+def yawdisp2poses(yaw_disps):
+    poses = []
+    curr_x, curr_z = 0.0, 0.0
+    curr_yaw = 0.0
+    for disp, yaw in yaw_disps:
+        curr_x += disp * np.cos(yaw)
+        curr_z += disp * np.sin(yaw)
+        curr_yaw += yaw
+        # Construct transformation matrix
+        cos_yaw = np.cos(curr_yaw)
+        sin_yaw = np.sin(curr_yaw)
+        transformation_matrix = np.array([
+            [cos_yaw, 0, -sin_yaw, curr_x],
+            [0,       1, 0,        0.0   ],
+            [sin_yaw, 0, cos_yaw,  curr_z],
+            [0,       0, 0,        1.0   ]
+        ])
+        poses.append(transformation_matrix)
     return poses
+
+def yawdisp2kitti_eval(yaw_disps):
+    kitti_format = []
+    poses = yawdisp2poses(yaw_disps)
+    for pose in poses:
+        flat_pose = pose[0:3, :].flatten()
+        kitti_format.append(flat_pose.tolist())
+
+    return kitti_format
 
 def load_poses(pose_file):
     poses = []
@@ -102,28 +103,6 @@ def plot_yaw_disp_traj(estm, gt):
     plt.tight_layout()
     plt.savefig('yaw_displacement_comparison.png')
 
-def plot_poses(estm_poses, gt_poses):
-    x_estm, z_estm = [], []
-    for pose in estm_poses:
-        x_estm.append(pose[0, 3])
-        z_estm.append(pose[2, 3])
-
-    x_gt, z_gt = [], []
-    for pose in gt_poses:
-        x_gt.append(pose[0, 3])
-        z_gt.append(pose[2, 3])
-
-    plt.figure()
-    plt.plot(x_estm, z_estm, marker='o', label='Estimated')
-    # plt.plot(x_gt, z_gt, marker='x', label='Ground Truth')
-    plt.title('Camera Trajectory')
-    plt.xlabel('X position (m)')
-    plt.ylabel('Z position (m)')
-    plt.axis('equal')
-    plt.grid()
-    plt.legend()
-    plt.savefig('trajectory_comparison.png')
-
 def plot_yaw_disp_comp(estm, gt):
     estm_disps, estm_yaws = zip(*estm)
     gt_disps, gt_yaws = zip(*gt)
@@ -151,10 +130,10 @@ def plot_yaw_disp_comp(estm, gt):
     plt.tight_layout()
     plt.savefig('yaw_displacement_values_comparison.png')
 
-def run_vo(dataset_root, pose_file, weights_path):
+def run_vo(dataset_root, seq, weights_path):
 
     transform = transforms.Compose([
-        transforms.Resize(KITTIOdometryDataset.IMAGE_SIZE),
+        transforms.Resize(params["img_size"]),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.3583], std=[0.3142])
     ])
@@ -162,15 +141,16 @@ def run_vo(dataset_root, pose_file, weights_path):
     window_size = 2
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = ViTVO(KITTIOdometryDataset.IMAGE_SIZE).to(device)
+    model = ViTVO(params).to(device)
     model.load_state_dict(torch.load(weights_path, map_location=device))
     model.eval()
 
     print("Model loaded")
 
-    images_dir = os.path.join(dataset_root, 'sequences', pose_file.removesuffix('.txt'), 'image_0')
+    images_dir = os.path.join(dataset_root, 'sequences',seq, 'image_0')
+    depth_dir = os.path.join(dataset_root, 'sequences',seq, 'depth_0')
     image_files = sorted(glob.glob(os.path.join(images_dir, '*.png')))
-    # image_files = image_files[::6]  # Reduce rate to 5hz (get 1/6th of the dataset)
+    depth_files = sorted(glob.glob(os.path.join(depth_dir, '*.png')))
 
     yaw_disps = []
     for i in tqdm(range(len(image_files) - 2), desc="Running VO"):
@@ -178,9 +158,11 @@ def run_vo(dataset_root, pose_file, weights_path):
         imgs = []
         for w in range(window_size):
 
-            img_path = image_files[i + w]
-            img = Image.open(img_path) 
+            img = Image.open(image_files[i + w]) 
+            depth = Image.open(depth_files[i + w])
             img = transform(img)
+            depth = transform(depth)
+            img = torch.cat((img, depth), dim=0)  # concatenate image and depth channels
             img = img.unsqueeze(0) # add frames dimension
             imgs.append(img)
 
@@ -196,25 +178,42 @@ def run_vo(dataset_root, pose_file, weights_path):
         disp, yaw = y.squeeze(0).cpu().numpy()
 
         # Denormalize
-        disp = disp * DISP_NORM[1] + DISP_NORM[0]
-        yaw = yaw * YAW_NORM[1] + YAW_NORM[0]
+        disp = disp * params['disp_norm'][1] + params['disp_norm'][0]
+        yaw = yaw * params['yaw_norm'][1] + params['yaw_norm'][0]
 
         yaw_disps.append((disp, yaw))
         # print(yaw_disp)
 
+    # low pass filter
+    # disps, yaws = zip(*yaw_disps)
+    # disps_filt = lowpass_filter(disps, cutoff=0.1, fs=10.0, order=5)
+    # yaws_filt = lowpass_filter(yaws, cutoff=0.1, fs=10.0, order=5)
+    # yaw_disps = list(zip(disps_filt, yaws_filt))
+
     print("Number of poses: ", len(yaw_disps))
+
+    pose_file = f"{seq}.txt"
     gt_poses = load_poses(os.path.join(dataset_root, 'poses', pose_file))
     gt_yaw_disp = poses2yaw_displacement(gt_poses)
     plot_yaw_disp_traj(yaw_disps, gt_yaw_disp)
     plot_yaw_disp_comp(yaw_disps, gt_yaw_disp)
 
-if __name__ == "__main__":
-    dataset_root = "/home/gopontarolo/siamese-vo/Datasets/kitti-odometry/dataset"
-    test_seq = ['01', '03', '04', '05', '06', '07', '10']
-    pose_file = "03.txt"
-    weights_path = "checkpoints/2025-11-13_10-20-43/siamvo_epoch_88.pth"
+    # save in KITTI format
+    kitti_poses = yawdisp2kitti_eval(yaw_disps)
+    output_file = f"{params['results_dir']}/{pose_file}"
+    with open(output_file, 'w') as f:
+        for pose in kitti_poses:
+            f.write(' '.join(map(str, pose)) + '\n')
+    print(f"Saved VO results to {output_file}")
 
-    run_vo(dataset_root, pose_file, weights_path)
+if __name__ == "__main__":
+    dataset_root = "Data/Datasets/kitti-odometry/dataset"
+    weights_path = "Data/checkpoints/depth-tsformer_base-2025-11-13_23-46-55/dtsvo_epoch_77-best.pth"
+    test_seq = ['05']
+
+    for seq in test_seq:
+        run_vo(dataset_root, seq, weights_path)
+    
     # gt_poses = load_poses(os.path.join(dataset_root, 'poses', pose_file))
     # gt_yaw_disp = poses2yaw_displacement(gt_poses)
     # plot_yaw_disp(gt_yaw_disp)

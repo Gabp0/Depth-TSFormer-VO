@@ -9,10 +9,10 @@ import torch
 import tqdm
 from fvcore.common.timer import Timer
 
-import utils.logging as logging
-import utils.misc as misc
+import tsformer.utils.logging as logging
+import tsformer.utils.misc as misc
 from timesformer.datasets import loader
-from utils.env import setup_environment
+from tsformer.utils.env import setup_environment
 
 logger = logging.get_logger(__name__)
 
