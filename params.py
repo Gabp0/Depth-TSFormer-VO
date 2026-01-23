@@ -11,8 +11,9 @@ params = {
     "output_dir": "./Data/checkpoints",
     "val_split": 0.2,
     "img_size": KITTIOdometryDataset.IMAGE_SIZE,
-    "disp_norm": KITTIOdometryDataset.DISP_NORM,
-    "yaw_norm": KITTIOdometryDataset.YAW_NORM,
+    "r_norm": KITTIOdometryDataset.R_NORM,
+    "theta_norm": KITTIOdometryDataset.THETA_NORM,
+    "dyaw_norm": KITTIOdometryDataset.DYAW_NORM,
 
     # depth params
     "depth_size": 'vits',
@@ -20,7 +21,7 @@ params = {
 
     "patch_size": 16,
     "in_chans": 2,
-    "num_classes": 2,
+    "num_classes": 3,
     "num_frames": 2,
     "depth": 12,
     "mlp_ratio": 4,
@@ -29,8 +30,13 @@ params = {
     "drop_path_rate": 0.1,
     "attention_type": 'divided_space_time',
 
+    # model params - large
+    # "results_dir": "./Data/results/dtsvo-v2_100ep",
+    # "embed_dim": 768,
+    # "num_heads": 12
+
     # model params - base
-    "results_dir": "./Data/results/dtsvo-base",
+    "results_dir": "./Data/results/dtsvo-v2",
     "embed_dim": 384,
     "num_heads": 6
 

@@ -3,6 +3,7 @@ import glob
 import torch
 import numpy as np
 from PIL import Image
+from tqdm import tqdm
 
 from torch.utils.data import Dataset
 from torch.utils.data import DataLoader
@@ -14,8 +15,9 @@ delta_pos = []
 class KITTIOdometryDataset(Dataset):
 
     IMAGE_SIZE = (192, 640)
-    DISP_NORM = (0.95525, 0.43561)
-    YAW_NORM = (0.09490, 1.72319)
+    R_NORM = (0.95525, 0.43561)
+    THETA_NORM = (0.09490, 1.72319)
+    DYAW_NORM = (-0.000440879, 0.01727572)
 
     world_T_cam = np.array([[0, 0, 1, 0],
                             [-1, 0, 0, 0],
@@ -51,20 +53,34 @@ class KITTIOdometryDataset(Dataset):
             self.dataset_sequences.append(image_files)
             self.dataset_depths.append(depth_files)
             self.dataset_poses.append(poses)
-            self.total_length += len(image_files) - (self.window_size - 1)
+
+            self.total_length += np.floor(len(image_files) / self.window_size).astype(int)
+
             print(f"Loaded sequence {sequence_num} with {len(image_files)} images")
         print(f"Total dataset length (window size {self.window_size}): {self.total_length} samples")
 
         # values calculated for the complete dataset
-        self.disp_norm = self.DISP_NORM  
-        self.yaw_norm =  self.YAW_NORM   
+        self.r_norm = self.R_NORM
+        self.theta_norm = self.THETA_NORM
+        self.dyaw_norm = self.DYAW_NORM
+
+        # all_r, all_theta, all_dyaw = [], [], []
+        # for seq_idx in range(len(self.dataset_poses)):
+        #     poses = self.dataset_poses[seq_idx]
+        #     for i in range(len(poses) - 1):
+        #         r, theta, dyaw = self.six_dof2three_dof(poses[i], poses[i + 1])
+        #         all_r.append(r)
+        #         all_theta.append(theta)
+        #         all_dyaw.append(dyaw)
+
+        # self.r_norm = (np.mean(all_r), np.std(all_r))
+        # self.theta_norm = (np.mean(all_theta), np.std(all_theta))
+        # self.dyaw_norm = (np.mean(all_dyaw), np.std(all_dyaw))
 
         print(f"Dataset normalization values: ")
-        print(f"Disparity - mean: {self.disp_norm[0]}  std dev: {self.disp_norm[1]}")
-        print(f"Yaw       - mean: {self.yaw_norm[0]}  std dev: {self.yaw_norm[1]}")
-
-        # disp: mean 0.9552555071464498  std dev 0.43561040902403037
-        # yaw:  mean 0.09490150096396582 std dev 1.7231921715542085
+        print(f"  r norm: mean {self.r_norm[0]}, std {self.r_norm[1]}")
+        print(f"  theta norm: mean {self.theta_norm[0]}, std {self.theta_norm[1]}")
+        print(f"  dyaw norm: mean {self.dyaw_norm[0]}, std {self.dyaw_norm[1]}")
 
         # Reduce rate to 5hz (get 1/6th of the dataset)
         # self.image_files = self.image_files[::6]
@@ -88,14 +104,16 @@ class KITTIOdometryDataset(Dataset):
                 
         return poses
 
-    def pose2yaw_disp(self, prev_pose, curr_pose):
+    def six_dof2three_dof(self, prev_pose, curr_pose):
+
+        prev_yaw = np.arctan2(prev_pose[1, 0], prev_pose[0, 0])
+        curr_yaw = np.arctan2(curr_pose[1, 0], curr_pose[0, 0])
+        dyaw = curr_yaw - prev_yaw
 
         dx = curr_pose[0, 3] - prev_pose[0, 3]
         dy = curr_pose[1, 3] - prev_pose[1, 3]
-        displacement = np.sqrt(dx**2 + dy**2)
-        yaw = np.arctan2(dy, dx)
 
-        return displacement, yaw
+        return dx, dy, dyaw
     
     def __len__(self):
         return self.total_length
@@ -103,8 +121,8 @@ class KITTIOdometryDataset(Dataset):
     def __getitem__(self, idx):
         # get sequence and local index
         seq_idx = 0
-        while idx >= len(self.dataset_sequences[seq_idx]) - (self.window_size - 1):
-            idx -= (len(self.dataset_sequences[seq_idx]) - (self.window_size - 1))
+        while idx >= np.floor(len(self.dataset_sequences[seq_idx]) / self.window_size).astype(int):
+            idx -= np.floor(len(self.dataset_sequences[seq_idx]) / self.window_size).astype(int)
             seq_idx += 1
 
         image_files = self.dataset_sequences[seq_idx]
@@ -113,6 +131,7 @@ class KITTIOdometryDataset(Dataset):
 
         # load images and apply transforms
         imgs = []
+        idx = idx * self.window_size
         for w in range(self.window_size):
 
             if idx + w >= len(image_files):
@@ -137,49 +156,58 @@ class KITTIOdometryDataset(Dataset):
         # get first and last gt pose 
         first_pose = poses[idx]
         last_pose = poses[idx + (self.window_size - 1)]
-        disp, yaw = self.pose2yaw_disp(first_pose, last_pose)
+        dx, dy, dyaw = self.six_dof2three_dof(first_pose, last_pose)
 
         # normalize
-        disp = (disp - self.disp_norm[0]) / self.disp_norm[1]
-        yaw = (yaw - self.yaw_norm[0]) / self.yaw_norm[1]
-        gt = torch.tensor([disp, yaw], dtype=torch.float32)
+
+        gt = torch.tensor([dx, dy, dyaw], dtype=torch.float32)
 
         return (imgs, gt)
 
-def plot_yaw_disp(gt):
+def plot_2dof_pose(gt):
+
+    current_pose = np.eye(4)
     
-    poses = []
-    for disp, yaw in gt:
-        if len(poses) == 0:
-            last_yaw = 0.0
-            last_x = 0.0
-            last_y = 0.0
-        else:
-            last_yaw = poses[-1][2]
-            last_x = poses[-1][0]
-            last_y = poses[-1][1]
+    poses = [current_pose.copy()]
+    curr_x, curr_y, curr_yaw = 0, 0, 0
+    for dx, dy, dyaw in gt:
 
-        yaw = yaw * KITTIOdometryDataset.YAW_NORM[1] + KITTIOdometryDataset.YAW_NORM[0]
-        disp = disp * KITTIOdometryDataset.DISP_NORM[1] + KITTIOdometryDataset.DISP_NORM[0]
+        curr_yaw += dyaw
+        curr_x += dx
+        curr_y += dy
 
-        curr_x = last_x + disp * np.cos(yaw)
-        curr_y = last_y + disp * np.sin(yaw)
+        new_pose = np.array([[np.cos(dyaw), -np.sin(dyaw), 0, curr_x],
+                             [np.sin(dyaw),  np.cos(dyaw), 0, curr_y],
+                             [0,             0,            1, 0],
+                             [0,             0,            0, 1]])
 
-        poses.append((curr_x, curr_y, yaw))
+        # current_pose = new_pose @ current_pose
+        poses.append(new_pose.copy())
 
-    x = [p[0] for p in poses]
-    y = [p[1] for p in poses]
+    x = [p[0, 3] for p in poses]
+    y = [p[1, 3] for p in poses]
+    yaw = [np.arctan2(p[1, 0], p[0, 0]) for p in poses]
 
     plt.figure()
     plt.plot(x, y, marker='o', label='Ground Truth')
-    plt.title('Yaw and Displacement Trajectory')
+    plt.title('2D Pose Trajectory')
     plt.xlabel('X position (m)')
     plt.ylabel('Y position (m)')
     plt.axis('equal')
     plt.grid()    
     plt.legend()
     plt.tight_layout()
-    plt.savefig('yaw_displacement_comparison.png')
+    plt.savefig('2d_trajectory.png')
+
+    plt.clf()
+    plt.plot(yaw, marker='o', label='Yaw Angle')
+    plt.title('Yaw Angle over Time')
+    plt.xlabel('Frame')
+    plt.ylabel('Yaw (rad)')
+    plt.grid()
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig('yaw_over_time.png')
 
 def plot_euler_angles(euler_angles, delta_pos):
     euler_angles = np.array(euler_angles)
@@ -228,27 +256,17 @@ def plot_euler_angles(euler_angles, delta_pos):
 if __name__ == "__main__":
     import matplotlib.pyplot as plt
 
-    val_split = 0.0
-    dataset = KITTIOdometryDataset(2, "./Data/Datasets/kitti-odometry/dataset", ["00"])
-
-    val_len = int(len(dataset) * val_split)
-    test_len = int(len(dataset) - val_len)
-    # train_data, val_data = torch.utils.data.random_split(dataset, [test_len, val_len], generator=torch.Generator().manual_seed(99))
-    
+    dataset = KITTIOdometryDataset(2, "./Data/Datasets/kitti-odometry/dataset", ['00'])
+    # dataset = KITTIOdometryDataset(2, "./Data/Datasets/kitti-odometry/dataset", ['00', '01', '02', '03', '04', '05', '06', '07', '08', '09', '10'])
     train_loader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=1)
-    # val_loader = DataLoader(val_data, batch_size=1, shuffle=False, num_workers=4)
 
     poses = []
     first_img = True
-    for imgs, gt in train_loader:
+    for imgs, gt in tqdm(train_loader):
         if first_img:
             first_img = False
 
-        disp, yaw = gt.squeeze(0).cpu().numpy()
-        poses.append((disp, yaw))
+        dx, dy, dyaw = gt[0].numpy()
+        poses.append((dx, dy, dyaw))
 
-    # for imgs, gt in val_loader:
-    #     disp, yaw = gt.squeeze(0).cpu().numpy()
-    #     poses.append((disp, yaw))
-
-    plot_yaw_disp(poses)
+    plot_2dof_pose(poses)

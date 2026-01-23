@@ -12,6 +12,13 @@ import os
 import glob
 import PIL.Image as Image
 
+from scipy.signal import butter, filtfilt
+
+world_T_cam = np.array([[0, 0, 1, 0],
+                        [-1, 0, 0, 0],
+                        [0, -1, 0, 0],
+                        [0, 0, 0, 1]])
+
 def yawdisp2poses(yaw_disps):
     poses = []
     curr_x, curr_y = 0.0, 0.0
@@ -31,9 +38,8 @@ def yawdisp2poses(yaw_disps):
         poses.append(transformation_matrix)
     return poses
 
-def yawdisp2kitti_eval(yaw_disps):
+def poses2kitti(poses):
     kitti_format = []
-    poses = yawdisp2poses(yaw_disps)
     for pose in poses:
         flat_pose = pose[0:3, :].flatten()
         kitti_format.append(flat_pose.tolist())
@@ -52,73 +58,137 @@ def load_poses(pose_file):
                 [pose[8], pose[9], pose[10], pose[11]],
                 [0, 0, 0, 1]
             ])
+
+            transformation_matrix = world_T_cam @ transformation_matrix
+
             poses.append(transformation_matrix)
 
     return poses
 
-def poses2yaw_displacement(poses):
-    yaw_displacements = []
+def low_pass_filter(poses, cutoff=0.1, fs=10.0, order=4):
+    nyq = 0.5 * fs
+    normal_cutoff = cutoff / nyq
+    b, a = butter(order, normal_cutoff, btype='low', analog=False)
+
+    poses_array = np.array(poses)
+    filtered_dx = filtfilt(b, a, poses_array[:, 0])
+    filtered_dy = filtfilt(b, a, poses_array[:, 1])
+    filtered_dyaw = filtfilt(b, a, poses_array[:, 2])
+
+    filtered_poses = list(zip(filtered_dx, filtered_dy, filtered_dyaw))
+    return filtered_poses
+
+
+def sixdof2twodof(poses):
+    two_dof = []
     for i in range(1, len(poses)):
-        dx = poses[i][0, 3] - poses[i-1][0, 3]
-        dz = poses[i][2, 3] - poses[i-1][2, 3]
-        displacement = np.sqrt(dx**2 + dz**2)
-        yaw = np.arctan2(dz, dx)
-        yaw_displacements.append((displacement, yaw))
-    return yaw_displacements
+        prev_pose = poses[i - 1]
+        curr_pose = poses[i]
+        rel_pose = curr_pose @ np.linalg.inv(prev_pose) 
 
-def plot_yaw_disp_traj(estm, gt):
-    estm_x, estm_y = [0], [0]
-    for disp, yaw in estm:
-        x = estm_x[-1] + disp * np.cos(yaw)
-        y = estm_y[-1] + disp * np.sin(yaw)
-        estm_x.append(x)
-        estm_y.append(y)
+        dx = rel_pose[0, 3]
+        dy = rel_pose[1, 3]
+        r = np.sqrt(dx**2 + dy**2)
+        theta = np.arctan2(dy, dx)
+        dyaw = np.arctan2(rel_pose[1, 0], rel_pose[0, 0])
 
-    gt_x, gt_y = [0], [0]
-    for disp, yaw in gt:
-        x = gt_x[-1] + disp * np.cos(yaw)
-        y = gt_y[-1] + disp * np.sin(yaw)
-        gt_x.append(x)
-        gt_y.append(y)
+        two_dof.append((r, theta, dyaw))
+
+    return two_dof
+
+def twodof2sixdof(twodof_poses):
+
+    current_pose = np.eye(4)
+    
+    sixdof_poses = [current_pose.copy()]
+    curr_x, curr_y, curr_yaw = 0, 0, 0
+    for dx, dy, dyaw in twodof_poses:
+
+        curr_yaw += dyaw
+        curr_x += dx
+        curr_y += dy
+
+        new_pose = np.array([[np.cos(dyaw), -np.sin(dyaw), 0, curr_x],
+                             [np.sin(dyaw),  np.cos(dyaw), 0, curr_y],
+                             [0,             0,            1, 0],
+                             [0,             0,            0, 1]])
+
+        sixdof_poses.append(new_pose.copy())
+
+    return sixdof_poses
+
+def plot_6dof_traj(estm, gt):
+    estm_x = [p[0, 3] for p in estm]
+    estm_y = [p[1, 3] for p in estm]
+    estm_yaw = [np.arctan2(p[1, 0], p[0, 0]) for p in estm]
+
+    gt_x = [p[0, 3] for p in gt]
+    gt_y = [p[1, 3] for p in gt]
+    gt_yaw = [np.arctan2(p[1, 0], p[0, 0]) for p in gt]
 
     plt.figure()
     plt.plot(estm_x, estm_y, marker='o', label='Estimated')
     plt.plot(gt_x, gt_y, marker='x', label='Ground Truth')
-    plt.title('Yaw and Displacement Trajectory')
+    plt.title('2D Pose Trajectory')
     plt.xlabel('X position (m)')
     plt.ylabel('Y position (m)')
     plt.axis('equal')
     plt.grid()    
     plt.legend()
     plt.tight_layout()
-    plt.savefig('yaw_displacement_comparison.png')
+    plt.savefig('2d_trajectory.png')
 
-def plot_yaw_disp_comp(estm, gt):
-    estm_disps, estm_yaws = zip(*estm)
-    gt_disps, gt_yaws = zip(*gt)
-
-    plt.figure(figsize=(12, 5))
-
-    plt.subplot(1, 2, 1)
-    plt.plot(estm_disps, label='Estimated')
-    plt.plot(gt_disps, label='Ground Truth')
-    plt.title('Displacement Comparison')
-    plt.xlabel('Frame Index')
-    plt.ylabel('Displacement (m)')
-    plt.legend()
+    plt.clf()
+    plt.plot(estm_yaw, marker='o', label='Estimated')
+    plt.plot(gt_yaw, marker='x', label='Ground Truth')
+    plt.title('Yaw Angle over Time')
+    plt.xlabel('Frame')
+    plt.ylabel('Yaw (rad)')
     plt.grid()
-
-    plt.subplot(1, 2, 2)
-    plt.plot(estm_yaws, label='Estimated')
-    plt.plot(gt_yaws, label='Ground Truth')
-    plt.title('Yaw Comparison')
-    plt.xlabel('Frame Index')
-    plt.ylabel('Yaw (radians)')
     plt.legend()
+    plt.tight_layout()
+    plt.savefig('yaw_over_time.png')
+
+def plot_components(twodof_poses, gt_2dof_poses):
+    estm_dx = [p[0] for p in twodof_poses]
+    estm_dy = [p[1] for p in twodof_poses]
+    estm_dyaw = [p[2] for p in twodof_poses]
+
+    gt_dx = [p[0] for p in gt_2dof_poses]
+    gt_dy = [p[1] for p in gt_2dof_poses]
+    gt_dyaw = [p[2] for p in gt_2dof_poses]
+
+    plt.figure(figsize=(12, 8))
+
+    plt.subplot(3, 1, 1)
+    plt.plot(estm_dx, label='Estimated dx', marker='o')
+    plt.plot(gt_dx, label='Ground Truth dx', marker='x')
+    plt.title('Displacement in X over Time')
+    plt.xlabel('Frame')
+    plt.ylabel('dx (m)')
     plt.grid()
+    plt.legend()
+
+    plt.subplot(3, 1, 2)
+    plt.plot(estm_dy, label='Estimated dy', marker='o')
+    plt.plot(gt_dy, label='Ground Truth dy', marker='x')
+    plt.title('Displacement in Y over Time')
+    plt.xlabel('Frame')
+    plt.ylabel('dy (m)')
+    plt.grid()
+    plt.legend()
+
+    plt.subplot(3, 1, 3)
+    plt.plot(estm_dyaw, label='Estimated dyaw', marker='o')
+    plt.plot(gt_dyaw, label='Ground Truth dyaw', marker='x')
+    plt.title('Yaw Change over Time')
+    plt.xlabel('Frame')
+    plt.ylabel('dyaw (rad)')
+    plt.grid()
+    plt.legend()
 
     plt.tight_layout()
-    plt.savefig('yaw_displacement_values_comparison.png')
+    plt.savefig('pose_components.png')
 
 def run_vo(dataset_root, seq, weights_path):
 
@@ -136,7 +206,7 @@ def run_vo(dataset_root, seq, weights_path):
     image_files = sorted(glob.glob(os.path.join(images_dir, '*.png')))
     depth_files = sorted(glob.glob(os.path.join(depth_dir, '*.png')))
 
-    yaw_disps = []
+    twodof_poses = []
     for i in tqdm(range(len(image_files) - 2), desc="Running VO"):
 
         imgs = []
@@ -148,21 +218,25 @@ def run_vo(dataset_root, seq, weights_path):
             imgs.append(img)
             depths.append(depth)
 
-        disp, yaw = model.infer_imgs(imgs)
+        dx, dy, dyaw = model.infer_imgs(imgs, depths)
 
-        yaw_disps.append((disp, yaw))
+        twodof_poses.append((dx, dy, dyaw))
 
-    print("Number of poses: ", len(yaw_disps))
+    print("Number of poses: ", len(twodof_poses))
 
-    pose_file = f"{seq}.txt"
-    gt_poses = load_poses(os.path.join(dataset_root, 'poses', pose_file))
-    gt_yaw_disp = poses2yaw_displacement(gt_poses)
-    plot_yaw_disp_traj(yaw_disps, gt_yaw_disp)
-    plot_yaw_disp_comp(yaw_disps, gt_yaw_disp)
+    # twodof_poses = low_pass_filter(twodof_poses, cutoff=0.1, fs=10.0)
+    sixdof_poses = twodof2sixdof(twodof_poses)
+    
+    gt_poses = load_poses(os.path.join(dataset_root, 'poses', f"{seq}.txt"))
+    gt_2dof_poses = sixdof2twodof(gt_poses)
+    gt_poses_reduced = twodof2sixdof(gt_2dof_poses)
+
+    plot_6dof_traj(sixdof_poses, gt_poses)
+    plot_components(twodof_poses, gt_2dof_poses)
 
     # save in KITTI format
-    kitti_poses = yawdisp2kitti_eval(yaw_disps)
-    output_file = f"{params['results_dir']}/{pose_file}"
+    kitti_poses = poses2kitti(sixdof_poses)
+    output_file = f"{params['results_dir']}/{seq}.txt"
     with open(output_file, 'w') as f:
         for pose in kitti_poses:
             f.write(' '.join(map(str, pose)) + '\n')
@@ -170,8 +244,8 @@ def run_vo(dataset_root, seq, weights_path):
 
 if __name__ == "__main__":
     dataset_root = "Data/Datasets/kitti-odometry/dataset"
-    weights_path = "Data/checkpoints/depth-tsformer_base-2025-11-13_23-46-55/dtsvo_epoch_77-best.pth"
-    test_seq = ['05']
+    weights_path = "Data/checkpoints/2026-01-21_21-37-39/dtsvo_epoch_73-best.pth"
+    test_seq = ['01', '03', '04', '05', '06', '07', '10']
 
     for seq in test_seq:
         run_vo(dataset_root, seq, weights_path)

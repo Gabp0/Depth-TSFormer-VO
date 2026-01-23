@@ -75,13 +75,15 @@ class ViTVO(torch.nn.Module):
         with torch.no_grad():
             y = self.forward(x)
 
-        disp, yaw = y.squeeze(0).cpu().numpy()
+        dx, dy, dyaw = y.squeeze(0).cpu().numpy()
 
         # denormalize
-        disp = disp * self.params['disp_norm'][1] + self.params['disp_norm'][0]
-        yaw = yaw * self.params['yaw_norm'][1] + self.params['yaw_norm'][0]
+        # r = r * self.params["r_norm"][1] + self.params["r_norm"][0]
+        # t = t * self.params["theta_norm"][1] + self.params["theta_norm"][0]
+        # dyaw = dyaw * self.params["dyaw_norm"][1] + self.params["dyaw_norm"][0]
 
-        return disp, yaw
+
+        return dx, dy, dyaw
 
 if __name__ == "__main__":
     from params import params
