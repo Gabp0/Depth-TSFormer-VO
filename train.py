@@ -1,14 +1,9 @@
 import os
 import torch
-import numpy as np
-import random
-import torchvision.transforms as transforms
 
-from torch.utils.data import DataLoader, random_split, Subset
-from tqdm import tqdm
+from torch.utils.data import DataLoader, random_split
 from datetime import datetime
 
-# from model_siam import SiamVO
 from model import ViTVO
 from kitti_dataset import KITTIOdometryDataset
 from params import params
@@ -25,8 +20,6 @@ def train(params):
     val_len = int(len(dataset) * params["val_split"])
     test_len = int(len(dataset) - val_len)
 
-    # train_data = Subset(dataset, list(range(0, test_len)))
-    # val_data = Subset(dataset, list(range(test_len, test_len + val_len)))
     train_data, val_data = random_split(dataset, [test_len, val_len], generator=torch.Generator().manual_seed(99))
 
     train_loader = DataLoader(train_data, batch_size=params["batch_size"], shuffle=True, num_workers=4)
@@ -49,7 +42,6 @@ def train(params):
         model.train()
         train_loss = 0.0
 
-        # for imgs, gt in tqdm(train_loader):
         for imgs, gt in train_loader:
             imgs = imgs.to(device)
             gt = gt.to(device)
@@ -83,14 +75,23 @@ def train(params):
         print(f"Validation Loss: {val_loss:.4f}")
 
         # Save model checkpoint
-        checkpoint_path = os.path.join(output_dir, f"dtsvo_epoch_{epoch+1}.pth")
-        torch.save(model.state_dict(), checkpoint_path)
-        loss_history.append((train_loss, val_loss))
-
         if val_loss < lowest_loss[1]:
             lowest_loss = (epoch+1, val_loss)
+
+        # same format as TSformer-VO checkpoints
+        state = {
+            "epoch": epoch+1,
+            "model_state_dict": model.backbone.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "best_val": lowest_loss[1],
+        }
+        checkpoint_path = os.path.join(output_dir, f"dtsvo_epoch_{epoch+1}.pth")
+        torch.save(state, checkpoint_path)
+        loss_history.append((train_loss, val_loss))
+
+        if lowest_loss[0] == epoch+1:
             best_model_path = os.path.join(output_dir, f"dtsvo_epoch_{epoch+1}-best.pth")
-            torch.save(model.state_dict(), best_model_path)
+            torch.save(state, best_model_path)
             print(f"Best model updated at epoch {epoch+1} with validation loss {val_loss:.4f}")
 
         # Plot loss history

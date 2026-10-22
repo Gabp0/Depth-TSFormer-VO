@@ -1,5 +1,4 @@
 import torch
-import torchvision.transforms as transforms
 from tqdm import tqdm
 
 from model import ViTVO
@@ -12,31 +11,10 @@ import os
 import glob
 import PIL.Image as Image
 
-from scipy.signal import butter, filtfilt
-
 world_T_cam = np.array([[0, 0, 1, 0],
                         [-1, 0, 0, 0],
                         [0, -1, 0, 0],
                         [0, 0, 0, 1]])
-
-def yawdisp2poses(yaw_disps):
-    poses = []
-    curr_x, curr_y = 0.0, 0.0
-    curr_yaw = 0.0
-    for disp, yaw in yaw_disps:
-        curr_yaw += yaw
-        curr_x += disp * np.cos(yaw)
-        curr_y += disp * np.sin(yaw)
-
-        transformation_matrix = np.array([
-            [np.cos(curr_yaw), -np.sin(curr_yaw), 0, curr_x],
-            [0,                 0,                1, 0],
-            [np.sin(curr_yaw),  np.cos(curr_yaw), 0, curr_y],
-            [0,                 0,                0, 1]
-        ])
-
-        poses.append(transformation_matrix)
-    return poses
 
 def poses2kitti(poses):
     kitti_format = []
@@ -65,26 +43,12 @@ def load_poses(pose_file):
 
     return poses
 
-def low_pass_filter(poses, cutoff=0.1, fs=10.0, order=4):
-    nyq = 0.5 * fs
-    normal_cutoff = cutoff / nyq
-    b, a = butter(order, normal_cutoff, btype='low', analog=False)
-
-    poses_array = np.array(poses)
-    filtered_dx = filtfilt(b, a, poses_array[:, 0])
-    filtered_dy = filtfilt(b, a, poses_array[:, 1])
-    filtered_dyaw = filtfilt(b, a, poses_array[:, 2])
-
-    filtered_poses = list(zip(filtered_dx, filtered_dy, filtered_dyaw))
-    return filtered_poses
-
-
 def sixdof2twodof(poses):
     two_dof = []
     for i in range(1, len(poses)):
         prev_pose = poses[i - 1]
         curr_pose = poses[i]
-        rel_pose = curr_pose @ np.linalg.inv(prev_pose) 
+        rel_pose = curr_pose @ np.linalg.inv(prev_pose)
 
         dx = rel_pose[0, 3]
         dy = rel_pose[1, 3]
@@ -95,27 +59,6 @@ def sixdof2twodof(poses):
         two_dof.append((r, theta, dyaw))
 
     return two_dof
-
-def twodof2sixdof(twodof_poses):
-
-    current_pose = np.eye(4)
-    
-    sixdof_poses = [current_pose.copy()]
-    curr_x, curr_y, curr_yaw = 0, 0, 0
-    for dx, dy, dyaw in twodof_poses:
-
-        curr_yaw += dyaw
-        curr_x += dx
-        curr_y += dy
-
-        new_pose = np.array([[np.cos(dyaw), -np.sin(dyaw), 0, curr_x],
-                             [np.sin(dyaw),  np.cos(dyaw), 0, curr_y],
-                             [0,             0,            1, 0],
-                             [0,             0,            0, 1]])
-
-        sixdof_poses.append(new_pose.copy())
-
-    return sixdof_poses
 
 def plot_6dof_traj(estm, gt):
     estm_x = [p[0, 3] for p in estm]
@@ -133,7 +76,7 @@ def plot_6dof_traj(estm, gt):
     plt.xlabel('X position (m)')
     plt.ylabel('Y position (m)')
     plt.axis('equal')
-    plt.grid()    
+    plt.grid()
     plt.legend()
     plt.tight_layout()
     plt.savefig('2d_trajectory.png')
@@ -148,6 +91,7 @@ def plot_6dof_traj(estm, gt):
     plt.legend()
     plt.tight_layout()
     plt.savefig('yaw_over_time.png')
+    plt.close('all')
 
 def plot_components(twodof_poses, gt_2dof_poses):
     estm_dx = [p[0] for p in twodof_poses]
@@ -189,6 +133,7 @@ def plot_components(twodof_poses, gt_2dof_poses):
 
     plt.tight_layout()
     plt.savefig('pose_components.png')
+    plt.close('all')
 
 def run_vo(dataset_root, seq, weights_path):
 
@@ -196,7 +141,7 @@ def run_vo(dataset_root, seq, weights_path):
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = ViTVO(params).to(device)
-    model.load_state_dict(torch.load(weights_path, map_location=device))
+    model.load_checkpoint(weights_path, device)
     model.eval()
 
     print("Model loaded")
@@ -206,36 +151,35 @@ def run_vo(dataset_root, seq, weights_path):
     image_files = sorted(glob.glob(os.path.join(images_dir, '*.png')))
     depth_files = sorted(glob.glob(os.path.join(depth_dir, '*.png')))
 
-    twodof_poses = []
-    for i in tqdm(range(len(image_files) - 2), desc="Running VO"):
+    # accumulate relative transforms, in the KITTI camera frame
+    T_abs = np.eye(4)
+    sixdof_poses = [T_abs]
+    for i in tqdm(range(len(image_files) - 1), desc="Running VO"):
 
         imgs = []
         depths = []
         for w in range(window_size):
 
-            img = Image.open(image_files[i + w]) 
+            img = Image.open(image_files[i + w])
             depth = Image.open(depth_files[i + w])
             imgs.append(img)
             depths.append(depth)
 
-        dx, dy, dyaw = model.infer_imgs(imgs, depths)
+        T_rel = model.infer_imgs(imgs, depths)
+        T_abs = T_abs @ T_rel
+        sixdof_poses.append(T_abs)
 
-        twodof_poses.append((dx, dy, dyaw))
+    print("Number of poses: ", len(sixdof_poses))
 
-    print("Number of poses: ", len(twodof_poses))
-
-    # twodof_poses = low_pass_filter(twodof_poses, cutoff=0.1, fs=10.0)
-    sixdof_poses = twodof2sixdof(twodof_poses)
-    
+    world_poses = [world_T_cam @ pose for pose in sixdof_poses]
     gt_poses = load_poses(os.path.join(dataset_root, 'poses', f"{seq}.txt"))
-    gt_2dof_poses = sixdof2twodof(gt_poses)
-    gt_poses_reduced = twodof2sixdof(gt_2dof_poses)
 
-    plot_6dof_traj(sixdof_poses, gt_poses)
-    plot_components(twodof_poses, gt_2dof_poses)
+    plot_6dof_traj(world_poses, gt_poses)
+    plot_components(sixdof2twodof(world_poses), sixdof2twodof(gt_poses))
 
     # save in KITTI format
     kitti_poses = poses2kitti(sixdof_poses)
+    os.makedirs(params['results_dir'], exist_ok=True)
     output_file = f"{params['results_dir']}/{seq}.txt"
     with open(output_file, 'w') as f:
         for pose in kitti_poses:
@@ -244,7 +188,7 @@ def run_vo(dataset_root, seq, weights_path):
 
 if __name__ == "__main__":
     dataset_root = "Data/Datasets/kitti-odometry/dataset"
-    weights_path = "Data/checkpoints/2026-01-21_21-37-39/dtsvo_epoch_73-best.pth"
+    weights_path = "../TSformer-VO/checkpoints/exp_dtsvo-v3.1-small/checkpoint_best.pth"
     test_seq = ['01', '03', '04', '05', '06', '07', '10']
 
     for seq in test_seq:
